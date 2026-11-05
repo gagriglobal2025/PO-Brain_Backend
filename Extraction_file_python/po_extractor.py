@@ -175,7 +175,7 @@ def parse_email_bytes(raw_bytes: bytes) -> dict:
     if msg.is_multipart():
         for part in msg.walk():
             ct          = part.get_content_type()
-            disposition = str(part.get("Content-Disposition", "") or "")
+            disposition = part.get("Content-Disposition", "") or ""
             if "attachment" in disposition.lower():
                 continue
             payload = _decode_part(part)
@@ -453,11 +453,11 @@ def extract_po_from_email(email_data: dict) -> List[dict]:
 
     try:
         raw = _call_openai(client, prompt)
-    except APIStatusError as exc:
-        log.error(f"  OpenAI error {exc.status_code}: {exc.message}")
-        raise
     except (APIConnectionError, RateLimitError) as exc:
         log.error(f"  OpenAI connection/rate error: {exc}")
+        raise
+    except APIStatusError as exc:
+        log.error(f"  OpenAI error {exc.status_code}: {exc.message}")
         raise
 
     cleaned = _clean_json_response(raw)
