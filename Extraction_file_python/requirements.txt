@@ -1,0 +1,31 @@
+# PO-Brain Unified Extractor — Python Dependencies
+# Install with: pip install -r requirements.txt
+# Updated: 2026-06-12 — fixes openai/httpx 'proxies' incompatibility
+
+# ── Database ────────────────────────────────────────────────
+pyodbc>=5.1.0                  # MSSQL/SQL Server ODBC connector
+
+# ── Email / HTML Parsing ────────────────────────────────────
+beautifulsoup4>=4.12.3         # HTML-to-text (bs4)
+lxml>=5.2.2                    # HTML parser backend for bs4
+
+# ── AI / OpenAI ─────────────────────────────────────────────
+# CRITICAL: openai<1.55 passes 'proxies' to httpx, which was
+# removed in httpx 0.28+. Using openai>=1.55 fixes this.
+openai>=1.55.0                 # OpenAI GPT-4o API client (compatible with httpx 0.28+)
+httpx>=0.28.0                  # HTTP client used internally by openai
+
+# ── PDF Extraction ──────────────────────────────────────────
+pdfplumber>=0.11.0             # Native PDF text + table extraction
+pdf2image>=1.17.0              # Convert PDF pages to PIL images for OCR
+
+# ── OCR ─────────────────────────────────────────────────────
+pytesseract>=0.3.10            # Python wrapper for Tesseract OCR
+Pillow>=10.3.0                 # PIL image processing (required by pytesseract)
+
+# ── Logging / Console Colours ───────────────────────────────
+colorlog>=6.8.2                # Colourized log output for console
+
+# ── Standard library extras (usually pre-installed) ─────────
+# imaplib, email, hashlib, re, json, os, sys, time, traceback
+# contextlib, datetime, tempfile, typing, argparse — all stdlib

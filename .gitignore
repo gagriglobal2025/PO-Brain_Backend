@@ -1,0 +1,41 @@
+# Visual Studio / VS Code
+.vs/
+**/.vs/
+.vscode/
+**/.vscode/
+*.user
+*.userosscache
+*.suo
+*.userprefs
+*.sln.docstates
+
+# Build results (.NET)
+[Bb]in/
+**/[Bb]in/
+[Oo]bj/
+**/[Oo]bj/
+
+# Logs
+[Ll]og/
+**/[Ll]og/
+[Ll]ogs/
+**/[Ll]ogs/
+*.log
+
+# Python
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.env
+.venv/
+venv/
+ENV/
+env/
+
+# OS generated files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
