@@ -7,5 +7,7 @@ public interface IFailedTransactionService
 {
     Task<PagedResponse<FailedTransactionDto>> GetAllAsync(string? search, int page, int pageSize);
     Task<PagedResponse<FailedTransactionDto>> GetAllWithFiltersAsync(FailedTransactionFilterRequest filter);
+    Task<int> GetPendingCountAsync();
     Task<byte[]> ExportToCsvAsync(FailedTransactionFilterRequest filter);
+    Task<RerunFailedTransactionResponse> RerunAsync(RerunFailedTransactionRequest request, string? user = null);
 }

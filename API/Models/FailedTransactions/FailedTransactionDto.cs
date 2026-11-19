@@ -2,6 +2,7 @@ namespace POBrain.API.Models.FailedTransactions;
 
 public class FailedTransactionDto
 {
+    public long? FailedId { get; init; }
     public string? PoNumber { get; init; }
     public string? PoDate { get; init; }
     public string? ProductName { get; init; }

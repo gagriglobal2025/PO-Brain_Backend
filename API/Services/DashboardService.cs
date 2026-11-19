@@ -10,22 +10,22 @@ public class DashboardService(PoBrainDbContext db) : IDashboardService
     {
         var rows = await db.Database.SqlQuery<StatsRow>($"""
             SELECT
-                COUNT(*)                                                          AS TotalEmails,
-                SUM(CASE WHEN e.status_id = 3  THEN 1 ELSE 0 END)                AS Processed,
-                SUM(CASE WHEN e.status_id = 4  THEN 1 ELSE 0 END)                AS Failed,
-                SUM(CASE WHEN e.status_id NOT IN (3,4) THEN 1 ELSE 0 END)        AS InProgress
-            FROM dbo.pobrain_emails e
+                (SELECT COUNT(*) FROM dbo.pobrain_emails) AS TotalEmails,
+                (SELECT COUNT(*) FROM dbo.pobrain_purchase_orders WHERE is_erp_inserted = 1) AS Processed,
+                (SELECT COUNT(*) FROM dbo.pobrain_failed_transactions WHERE is_reprocessed = 0) AS Failed,
+                (SELECT COUNT(*) FROM dbo.pobrain_emails WHERE status_id = 2) AS InProgress
             """).ToListAsync();
 
-        var r           = rows.FirstOrDefault() ?? new StatsRow();
-        var successRate = r.TotalEmails > 0
-            ? Math.Round((double)r.Processed / r.TotalEmails * 100, 1)
-            : 0d;
-        var status      = r.InProgress > 0 ? "Active" : r.TotalEmails == 0 ? "Idle" : "Active";
+        var r = rows.FirstOrDefault() ?? new StatsRow();
+        var effectiveTotal = Math.Max(r.TotalEmails, r.Processed + r.Failed);
+        var successRate = effectiveTotal > 0
+            ? Math.Round((double)r.Processed / effectiveTotal * 100, 1)
+            : 100d;
+        var status = r.InProgress > 0 ? "Processing" : "Live";
 
         return new DashboardStatsDto
         {
-            TotalEmails   = r.TotalEmails,
+            TotalEmails   = effectiveTotal,
             Processed     = r.Processed,
             Failed        = r.Failed,
             SuccessRate   = successRate,
@@ -35,31 +35,41 @@ public class DashboardService(PoBrainDbContext db) : IDashboardService
 
     public async Task<IEnumerable<RecentExtractionDto>> GetRecentExtractionsAsync(int count = 10)
     {
-        return await db.Database.SqlQuery<RecentRow>($"""
+        var rows = await db.Database.SqlQuery<RecentRow>($"""
             SELECT TOP ({count})
-                po.po_number      AS PoNumber,
-                li.product_name   AS ProductName,
-                li.amount         AS Amount,
-                s.status_name     AS StatusName
-            FROM dbo.pobrain_purchase_order_line_items li
-            JOIN dbo.pobrain_purchase_orders     po ON li.po_id      = po.po_id
-            JOIN dbo.pobrain_lkp_status           s ON po.status_id  = s.status_id
+                po.po_number                                            AS PoNumber,
+                COALESCE(po.vendor_name, 'Unknown Vendor')             AS VendorName,
+                COALESCE(po.total_amount, 0)                            AS TotalAmount,
+                CAST(po.po_date AS DATETIME)                            AS PoDate,
+                po.created_at                                           AS CreatedAt,
+                CASE WHEN po.is_erp_inserted = 1 THEN 'SUCCESS'
+                     WHEN ft.failed_id IS NOT NULL THEN 'FAILED'
+                     ELSE 'PENDING'
+                END                                                     AS StatusName
+            FROM dbo.pobrain_purchase_orders po
+            LEFT JOIN dbo.pobrain_failed_transactions ft 
+                ON po.po_number = ft.po_number AND ft.is_reprocessed = 0
             WHERE po.po_number NOT LIKE 'TEMP-%'
-            ORDER BY li.created_at DESC
-            """)
-            .Select(r => new RecentExtractionDto
-            {
-                Id     = r.PoNumber,
-                Name   = r.ProductName,
-                Amount = r.Amount,
-                Status = r.StatusName.Contains("Active", StringComparison.OrdinalIgnoreCase) ? "SUCCESS" : "FAILED"
-            })
-            .ToListAsync();
+            ORDER BY po.created_at DESC
+            """).ToListAsync();
+
+        return rows.Select(r => new RecentExtractionDto
+        {
+            Id          = r.PoNumber,
+            PoNumber    = r.PoNumber,
+            Name        = r.VendorName,
+            VendorName  = r.VendorName,
+            Amount      = r.TotalAmount,
+            TotalAmount = r.TotalAmount,
+            Status      = r.StatusName,
+            PoDate      = r.PoDate?.ToString("yyyy-MM-dd"),
+            CreatedAt   = r.CreatedAt.ToString("o")
+        });
     }
 
     public async Task<HealthStatusDto> GetHealthStatusAsync()
     {
-        // Try snapshots first; fall back to computing from live data
+        // Try snapshots first; fall back to computing from live operational data
         var snaps = await db.Database.SqlQuery<SnapRow>($"""
             SELECT component_name AS ComponentName, health_pct AS HealthPct
             FROM (
@@ -79,31 +89,31 @@ public class DashboardService(PoBrainDbContext db) : IDashboardService
 
         if (engine < 0 || parser < 0 || ocr < 0)
         {
-            // Compute from live data
+            // Compute from live operational counts
             var live = await db.Database.SqlQuery<LiveHealth>($"""
                 SELECT
                     CASE WHEN total_emails = 0 THEN 100.0
-                         ELSE CAST(completed_emails AS FLOAT) / total_emails * 100 END AS ParserPct,
-                    CASE WHEN total_jobs   = 0 THEN 100.0
-                         ELSE CAST(completed_jobs   AS FLOAT) / total_jobs   * 100 END AS EnginePct,
-                    CASE WHEN total_ocr    = 0 THEN 100.0
-                         ELSE CAST(completed_ocr    AS FLOAT) / total_ocr    * 100 END AS OcrPct
+                         ELSE CAST(total_emails - parse_failures AS FLOAT) / total_emails * 100 END AS ParserPct,
+                    CASE WHEN total_jobs = 0 THEN 100.0
+                         ELSE CAST(completed_jobs AS FLOAT) / total_jobs * 100 END AS EnginePct,
+                    CASE WHEN total_ocr = 0 THEN 100.0
+                         ELSE CAST(completed_ocr AS FLOAT) / total_ocr * 100 END AS OcrPct
                 FROM (
                     SELECT
-                        COUNT(*)                                             AS total_emails,
-                        SUM(CASE WHEN status_id = 3 THEN 1 ELSE 0 END)      AS completed_emails
+                        COUNT(*) AS total_emails,
+                        SUM(CASE WHEN failure_reason LIKE '%PARSE%' THEN 1 ELSE 0 END) AS parse_failures
                     FROM dbo.pobrain_emails
                 ) e,
                 (
                     SELECT
-                        COUNT(*)                                             AS total_jobs,
-                        SUM(CASE WHEN status_id = 23 THEN 1 ELSE 0 END)     AS completed_jobs
+                        COUNT(*) AS total_jobs,
+                        SUM(CASE WHEN status_id = 23 THEN 1 ELSE 0 END) AS completed_jobs
                     FROM dbo.pobrain_extraction_jobs
                 ) j,
                 (
                     SELECT
-                        COUNT(*)                                             AS total_ocr,
-                        SUM(CASE WHEN status_id = 16 THEN 1 ELSE 0 END)     AS completed_ocr
+                        COUNT(*) AS total_ocr,
+                        SUM(CASE WHEN status_id = 16 THEN 1 ELSE 0 END) AS completed_ocr
                     FROM dbo.pobrain_email_attachments
                     WHERE ocr_required = 1
                 ) a
@@ -135,10 +145,12 @@ public class DashboardService(PoBrainDbContext db) : IDashboardService
 
     private sealed class RecentRow
     {
-        public string  PoNumber    { get; set; } = null!;
-        public string  ProductName { get; set; } = null!;
-        public decimal Amount      { get; set; }
-        public string  StatusName  { get; set; } = null!;
+        public string    PoNumber    { get; set; } = null!;
+        public string    VendorName  { get; set; } = null!;
+        public decimal   TotalAmount { get; set; }
+        public DateTime? PoDate      { get; set; }
+        public DateTime  CreatedAt   { get; set; }
+        public string    StatusName  { get; set; } = null!;
     }
 
     private sealed class SnapRow

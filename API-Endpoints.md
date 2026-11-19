@@ -216,6 +216,7 @@ Monitors POs that could not be mapped or generated structural parser failures (p
 | **GET** | `/` | `Authorize` | Paginated search list of failure records. |
 | **POST** | `/filter` | `Authorize` | Returns filtered items with error logs. |
 | **POST** | `/export` | `Authorize` | Generates a downloadable CSV of filtered failure items. |
+| **POST** | `/rerun` | `Authorize` | Re-verifies vendor email against `tblRegistration`, inserts into legacy ERP tables, dispatches acknowledgment & internal notification emails, and updates status. |
 
 #### Request/Response Examples (`api/failed-transactions`):
 
@@ -302,3 +303,63 @@ Exposes API container/system health metrics for platform orchestrators (e.g. Kub
     }
     ```
 *   **Response (503 Service Unavailable - Unhealthy):** Returned if the connection to `hyma_testdb` is timed out or authentication failed.
+
+---
+
+### 4.8 Emails Controller (`api/emails`)
+
+Handles dispatching standardized order acknowledgment emails with compliant legal disclaimer and customer digital acceptance audit block.
+
+| Method | Route | Auth Policy | Description |
+| :--- | :--- | :--- | :--- |
+| **POST** | `/api/emails/order-acknowledgment` | `AllowAnonymous` | Dispatches the standardized order acknowledgment email with 14-column financials table, legal disclaimer, and digital acceptance audit block. Can resolve items/customer from DB using `orderId`, or accept custom overrides. |
+
+*   **Request Body (`OrderAcknowledgmentEmailRequest`):**
+    ```json
+    {
+      "orderId": 2627100647,
+      "poNumber": "PO/2026/011",
+      "recipientEmail": "buyer@client.com",
+      "customer": {
+        "companyName": "Gagri global",
+        "customerName": "Mohammed Naushad Ali",
+        "email": "mdnaushadali120@gmail.com",
+        "contactNo": "6303051592",
+        "city": "Hyderabad",
+        "gstNo": "36ABCDE1234F1Z5",
+        "comments": "attachment test"
+      },
+      "items": [
+        {
+          "orderNo": 2627100647,
+          "itemCode": "ASM2566",
+          "hsnCode": "29141300",
+          "gstRate": 18,
+          "casNo": "108-10-1",
+          "chemicalName": "4-Methyl-2-pentanone, 98%",
+          "packSize": "500 ml",
+          "quantity": 1,
+          "unitPrice": 518.00,
+          "price": 518.00,
+          "discountPercent": 10.00,
+          "discountPrice": 466.20,
+          "gstPrice": 83.92,
+          "totalPrice": 550.12
+        }
+      ],
+      "comments": "attachment test",
+      "ipAddress": "122.175.19.60",
+      "acceptanceDate": "05-Nov-2026",
+      "acceptanceStatus": "ACCEPTED ELECTRONICALLY AT THE TIME OF WEB ORDER PLACEMENT"
+    }
+    ```
+    *Note: When `items` or `customer` are omitted or partial, the backend automatically hydrates them from `dbo.tblClientOrder`, `dbo.tblRegistration`, and `dbo.tblComment` using `orderId`.*
+
+*   **Response (200 OK):**
+    ```json
+    {
+      "success": true,
+      "message": "Order acknowledgment email sent successfully to buyer@client.com"
+    }
+    ```
+
