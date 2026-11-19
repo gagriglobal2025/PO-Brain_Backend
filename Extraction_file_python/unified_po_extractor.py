@@ -1011,7 +1011,7 @@ def lookup_customer_by_email(cursor, email: Optional[str]) -> Optional[Dict[str,
         cursor.execute(
             "SELECT TOP 1 PersonID, CompanyCode, Discount, "
             "ContPerson AS FullName, "
-            "Phone1 AS MobileNo, City, CompanyName "
+            "Phone1 AS MobileNo, City, CompanyName, GSTNo "
             "FROM dbo.tblRegistration WHERE EMailID = ?",
             email.strip(),
         )
@@ -1029,6 +1029,7 @@ def lookup_customer_by_email(cursor, email: Optional[str]) -> Optional[Dict[str,
             "mobile_no":    str(row[4]).strip() if row[4] else None,
             "city":         str(row[5]).strip() if row[5] else None,
             "company_name": str(row[6]).strip() if row[6] else None,
+            "gst_no":       str(row[7]).strip() if len(row) > 7 and row[7] else None,
         }
     except Exception as e:
         log.warning(f"Failed to lookup customer for email {email}: {e}")
@@ -1231,6 +1232,101 @@ def compute_line_financials(cursor, item: Dict[str, Any], cust_discount: Optiona
     }
 
 
+def send_order_acknowledgment_via_api(
+    order_id: int,
+    po_num: str,
+    vendor_email: str,
+    customer: dict,
+    items: List[Dict[str, Any]],
+    comments: Optional[str] = None,
+    financials: Optional[List[Dict[str, Any]]] = None,
+) -> bool:
+    """Send order acknowledgment email via the centralized PO-Brain Backend API.
+    
+    Returns True if successfully sent via the API, or False to fall back to direct SMTP.
+    """
+    import urllib.request
+    import urllib.error
+    
+    api_url = os.environ.get("BACKEND_API_URL", "https://coreapiv1pobrain.pobrainhyma.com").rstrip("/")
+    endpoint = f"{api_url}/api/emails/order-acknowledgment"
+
+    financials = financials or []
+    api_items = []
+    for idx, item in enumerate(items, 1):
+        fin = financials[idx - 1] if idx - 1 < len(financials) else {}
+        qty = float(fin.get("qty") or item.get("quantity") or 1.0)
+        unit_price = float(fin.get("unit_price") or item.get("unit_price") or 0.0)
+        price = float(fin.get("price") or item.get("amount") or (qty * unit_price))
+        disc_pct = float(fin.get("disc_pct") or 0.0)
+        disc_price = float(fin.get("discount_price") or (price * (100.0 - disc_pct) / 100.0))
+        gst_pct = float(fin.get("gst_pct") or item.get("_resolved_gst_pct") or 18.0)
+        gst_price = float(fin.get("gst_amount") or (disc_price * gst_pct / 100.0))
+        total_item = float(fin.get("line_total") or (disc_price + gst_price))
+
+        api_items.append({
+            "orderNo": order_id,
+            "itemCode": item.get("cat_number") or item.get("item_code") or "",
+            "hsnCode": item.get("hsn_code") or "",
+            "gstRate": gst_pct,
+            "casNo": item.get("cas_number") or "",
+            "chemicalName": item.get("product_name") or "",
+            "packSize": item.get("pack_size") or item.get("unit_of_measure") or "",
+            "quantity": qty,
+            "unitPrice": unit_price,
+            "price": price,
+            "discountPercent": disc_pct,
+            "discountPrice": disc_price,
+            "gstPrice": gst_price,
+            "totalPrice": total_item
+        })
+
+    payload = {
+        "orderId": order_id,
+        "poNumber": po_num,
+        "recipientEmail": vendor_email,
+        "customer": {
+            "companyName": customer.get("company_name") or customer.get("company_code") or "",
+            "customerName": customer.get("full_name") or "Customer",
+            "email": vendor_email,
+            "contactNo": customer.get("mobile_no") or "",
+            "city": customer.get("city") or "",
+            "gstNo": customer.get("gst_no") or "",
+            "comments": comments or ""
+        },
+        "items": api_items,
+        "comments": comments
+    }
+
+    try:
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            endpoint,
+            data=data,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "PO-Brain-Extractor/1.0"
+            },
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            if resp.status in (200, 201):
+                log.info(f"  EMAIL SENT via Backend API: Order {order_id} (PO: '{po_num}') -> {vendor_email}")
+                try:
+                    log_to_db(
+                        None, "INFO",
+                        f"Order acknowledgment email sent via Backend API to {vendor_email} for Order {order_id} (PO: '{po_num}').",
+                        vendor_email, f"Hyma | Web | Order | {order_id}"
+                    )
+                except Exception:
+                    pass
+                return True
+        return False
+    except Exception as e:
+        log.warning(f"  Backend API email endpoint failed or unreachable ({endpoint}): {e}. Falling back to direct SMTP.")
+        return False
+
+
 def send_order_acknowledgment_email(
     order_id: int,
     po_num: str,
@@ -1242,16 +1338,15 @@ def send_order_acknowledgment_email(
 ) -> None:
     """Send a rich HTML order acknowledgment email to the customer + internal CC.
 
-    Recipients:
-      TO  : vendor_email (the buyer who placed the PO)
-      CC  : SMTP_INTERNAL_CC (e.g. sales@hymasynthesis.com)
-    Template: Hyma standard order acknowledgment with line-item table + summary.
-
-    `financials` is the list of per-item money dicts (from compute_line_financials),
-    computed DURING the DB transaction and passed in so this function needs no DB
-    connection — it is sent AFTER the transaction commits, never holding locks.
-    Errors are caught and logged so they never affect the order.
+    First attempts to send via the centralized PO-Brain Backend API. If unreachable,
+    falls back to direct SMTP.
     """
+    # ── Attempt via Backend API endpoint first ─────────────────────────────────
+    try:
+        if send_order_acknowledgment_via_api(order_id, po_num, vendor_email, customer, items, comments, financials):
+            return
+    except Exception as api_err:
+        log.warning(f"  send_order_acknowledgment_via_api raised unexpected error: {api_err}. Proceeding with direct SMTP.")
     financials = financials or []
     import smtplib
     from email.mime.multipart import MIMEMultipart
@@ -1619,6 +1714,7 @@ def insert_into_legacy_tables(
             "full_name":    customer.get("full_name"),
             "mobile_no":    customer.get("mobile_no"),
             "city":         customer.get("city"),
+            "gst_no":       customer.get("gst_no"),
             "discount":     cust_discount,
         }
         email_comments = None
